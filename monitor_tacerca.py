@@ -37,6 +37,27 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+def get_run_mode():
+    """
+    Obtiene el modo de ejecución.
+
+    En ejecución manual permite input().
+    En systemd/GCP usa la variable de entorno TACERCA_RUN_MODE.
+    """
+    env_mode = os.getenv("TACERCA_RUN_MODE", "").strip()
+
+    if env_mode in {"1", "2", "3"}:
+        return env_mode
+
+    if sys.stdin.isatty():
+modo = get_run_mode()
+print(f"Modo de ejecución seleccionado: {modo}")
+        if mode in {"1", "2", "3"}:
+            return mode
+
+    # Valor por defecto para ejecución no interactiva
+    return "2"
+
 import requests
 from dotenv import load_dotenv
 
