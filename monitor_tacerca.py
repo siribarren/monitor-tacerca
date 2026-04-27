@@ -71,6 +71,35 @@ MASSIVE_DEFAULT_START_DATE = "04-05-2026"
 MASSIVE_DEFAULT_HOUR = "06:54"
 MASSIVE_DEFAULT_SEAT = 7
 MASSIVE_DEFAULT_DAYS = 7
+MAY_PLAN_DEFAULT_POLL_SECONDS = 30
+MAY_PLAN_DEFAULT_SEAT = 7
+MAY_PLAN_OUTBOUND_HOUR = "06:54"
+MAY_PLAN_RETURN_HOUR = "19:00"
+MAY_PLAN_DATE_BLOCKS = [
+    [
+        "04-05-2026",
+        "05-05-2026",
+        "06-05-2026",
+        "07-05-2026",
+        "08-05-2026",
+        "12-05-2026",
+        "13-05-2026",
+    ],
+    [
+        "14-05-2026",
+        "15-05-2026",
+        "18-05-2026",
+        "19-05-2026",
+        "20-05-2026",
+        "22-05-2026",
+        "26-05-2026",
+    ],
+    [
+        "27-05-2026",
+        "28-05-2026",
+        "29-05-2026",
+    ],
+]
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -138,9 +167,10 @@ def ask_run_mode() -> str:
     print("Elige modo de ejecución.")
     print("1) Monitor / reserva puntual actual")
     print("2) Compra masiva Piedra Roja 04-05-2026 06:54 asiento 7")
-    option = input("Elige una opción [1/2]: ").strip()
-    if option not in {"1", "2"}:
-        raise ValueError("Opción inválida. Elige 1 o 2.")
+    print("3) Plan Mayo 2026 ida/vuelta Piedra Roja")
+    option = input("Elige una opción [1/2/3]: ").strip()
+    if option not in {"1", "2", "3"}:
+        raise ValueError("Opción inválida. Elige 1, 2 o 3.")
     return option
 
 
@@ -253,6 +283,10 @@ def state_file_for_date(trip_date: str) -> Path:
 def state_file_for_massive(config: "MassiveBookingConfig") -> Path:
     safe_date = config.start_date.replace("-", "")
     return STATE_DIR / f"tacerca_massive_state_{safe_date}_{config.days}d.json"
+
+
+def state_file_for_may2026_plan() -> Path:
+    return STATE_DIR / "tacerca_plan_mayo_2026_state.json"
 
 
 def load_state(path: Path) -> dict[str, Any]:
@@ -385,22 +419,25 @@ def trip_execution_date(trip: dict[str, Any]) -> str:
     return ""
 
 
-def trip_station_origin_name(trip: dict[str, Any]) -> str:
+def trip_station_origin_name(trip: dict[str, Any], fallback: str = "Cond. Los Montes") -> str:
     return str(
         first_non_empty(
             trip.get("stationOrigin"),
             deep_find_first(trip, {"stationOriginName", "originName"}),
-            "Cond. Los Montes",
+            fallback,
         )
     )
 
 
-def trip_station_destination_name(trip: dict[str, Any]) -> str:
+def trip_station_destination_name(
+    trip: dict[str, Any],
+    fallback: str = "Metro Escuela Militar",
+) -> str:
     return str(
         first_non_empty(
             trip.get("stationDestination"),
             deep_find_first(trip, {"stationDestinationName", "destinationName"}),
-            "Metro Escuela Militar",
+            fallback,
         )
     )
 
@@ -684,6 +721,103 @@ def build_default_massive_config() -> MassiveBookingConfig:
 
 
 @dataclass
+class MayBookingBlock:
+    key: str
+    route_key: str
+    route_label: str
+    origin_id: str
+    destination_id: str
+    hour: str
+    dates: list[str]
+
+    def __post_init__(self) -> None:
+        if not self.origin_id or not self.destination_id:
+            raise ValueError(f"Faltan ids de ruta para {self.route_label}.")
+        self.hour = require_hhmm(self.hour)
+        if not 1 <= len(self.dates) <= 7:
+            raise ValueError("Cada bloque debe tener entre 1 y 7 fechas.")
+        for trip_date in self.dates:
+            validate_trip_date(trip_date)
+
+
+@dataclass
+class May2026PlanConfig:
+    seat: int
+    poll_seconds: int
+    type_payment: str
+    blocks: list[MayBookingBlock]
+
+    def __post_init__(self) -> None:
+        if self.seat < 1:
+            raise ValueError("El asiento objetivo debe ser mayor o igual a 1.")
+        if self.poll_seconds < 1:
+            raise ValueError("La frecuencia debe ser mayor o igual a 1 segundo.")
+        if self.type_payment != "wallet":
+            raise ValueError("El plan de mayo debe pagarse contra billetera.")
+        if not self.blocks:
+            raise ValueError("El plan de mayo no tiene bloques configurados.")
+
+        keys = [block.key for block in self.blocks]
+        if len(keys) != len(set(keys)):
+            raise ValueError("Hay bloques duplicados en el plan de mayo.")
+
+    @property
+    def trigger_block(self) -> MayBookingBlock:
+        return self.blocks[0]
+
+    @property
+    def total_reservations(self) -> int:
+        return sum(len(block.dates) for block in self.blocks)
+
+
+def build_may2026_plan_config(client: "TacercaClient") -> May2026PlanConfig:
+    seat = env_int("TACERCA_MAY_PLAN_SEAT", MAY_PLAN_DEFAULT_SEAT) or MAY_PLAN_DEFAULT_SEAT
+    poll_seconds = (
+        env_int("TACERCA_MAY_PLAN_POLL_SECONDS", MAY_PLAN_DEFAULT_POLL_SECONDS)
+        or MAY_PLAN_DEFAULT_POLL_SECONDS
+    )
+
+    outbound_origin_id = client.origin_id
+    outbound_destination_id = client.destination_id
+    return_origin_id = outbound_destination_id
+    return_destination_id = outbound_origin_id
+
+    blocks: list[MayBookingBlock] = []
+    for index, dates in enumerate(MAY_PLAN_DATE_BLOCKS, start=1):
+        blocks.append(
+            MayBookingBlock(
+                key=f"ida_bloque_{index}",
+                route_key="ida",
+                route_label="IDA Los Montes -> Escuela Militar",
+                origin_id=outbound_origin_id,
+                destination_id=outbound_destination_id,
+                hour=MAY_PLAN_OUTBOUND_HOUR,
+                dates=list(dates),
+            )
+        )
+
+    for index, dates in enumerate(MAY_PLAN_DATE_BLOCKS, start=1):
+        blocks.append(
+            MayBookingBlock(
+                key=f"regreso_bloque_{index}",
+                route_key="regreso",
+                route_label="REGRESO Escuela Militar -> Los Montes",
+                origin_id=return_origin_id,
+                destination_id=return_destination_id,
+                hour=MAY_PLAN_RETURN_HOUR,
+                dates=list(dates),
+            )
+        )
+
+    return May2026PlanConfig(
+        seat=seat,
+        poll_seconds=poll_seconds,
+        type_payment="wallet",
+        blocks=blocks,
+    )
+
+
+@dataclass
 class ReservationRule:
     exact_hours: list[str]
     hour_from: str | None
@@ -793,12 +927,17 @@ class TacercaClient:
         self.session.headers["Authorization"] = f"Bearer {token}"
         return token
 
-    def fetch_trips(self, trip_date: str) -> list[dict[str, Any]]:
+    def fetch_trips(
+        self,
+        trip_date: str,
+        origin_id: str | None = None,
+        destination_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         response = self.session.get(
             BOOKING_URL,
             params={
-                "origin": self.origin_id,
-                "destination": self.destination_id,
+                "origin": origin_id or self.origin_id,
+                "destination": destination_id or self.destination_id,
                 "date": str(date_to_unix_ms(trip_date)),
             },
             timeout=REQUEST_TIMEOUT,
@@ -811,15 +950,20 @@ class TacercaClient:
             raise RuntimeError(f"Respuesta inesperada del backend en get-booking: {payload}")
         return trips
 
-    def fetch_trips_for_dates(self, trip_dates: list[str]) -> list[dict[str, Any]]:
+    def fetch_trips_for_dates(
+        self,
+        trip_dates: list[str],
+        origin_id: str | None = None,
+        destination_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         if not trip_dates:
             return []
 
         response = self.session.get(
             BOOKING_URL,
             params={
-                "origin": self.origin_id,
-                "destination": self.destination_id,
+                "origin": origin_id or self.origin_id,
+                "destination": destination_id or self.destination_id,
                 "date": ",".join(str(date_to_unix_ms_noon(date)) for date in trip_dates),
             },
             timeout=REQUEST_TIMEOUT,
@@ -919,6 +1063,8 @@ class TacercaClient:
         self,
         trips: list[dict[str, Any]],
         seat_number: int,
+        station_origin_fallback: str = "Cond. Los Montes",
+        station_destination_fallback: str = "Metro Escuela Militar",
     ) -> dict[str, Any]:
         if not trips:
             raise RuntimeError("No hay viajes para armar Compra Masiva.")
@@ -940,8 +1086,11 @@ class TacercaClient:
                     "planningTrip": planning_trip_id,
                     "seating": seat,
                     "station": infer_station_id(trip),
-                    "stationOrigin": trip_station_origin_name(trip),
-                    "stationDestination": trip_station_destination_name(trip),
+                    "stationOrigin": trip_station_origin_name(trip, station_origin_fallback),
+                    "stationDestination": trip_station_destination_name(
+                        trip,
+                        station_destination_fallback,
+                    ),
                 }
             )
 
@@ -1244,6 +1393,302 @@ def build_massive_failed_message(config: MassiveBookingConfig, exc: Exception) -
             f"- Error: {exc}",
         ]
     )
+
+
+def format_trip_date_es(date_str: str) -> str:
+    weekdays = [
+        "lunes",
+        "martes",
+        "miércoles",
+        "jueves",
+        "viernes",
+        "sábado",
+        "domingo",
+    ]
+    months = {
+        1: "enero",
+        2: "febrero",
+        3: "marzo",
+        4: "abril",
+        5: "mayo",
+        6: "junio",
+        7: "julio",
+        8: "agosto",
+        9: "septiembre",
+        10: "octubre",
+        11: "noviembre",
+        12: "diciembre",
+    }
+    dt = datetime.strptime(date_str, "%d-%m-%Y")
+    return f"{weekdays[dt.weekday()]} {dt.day:02d} de {months[dt.month]} de {dt.year}"
+
+
+def block_dates_text(block: MayBookingBlock) -> str:
+    return ", ".join(format_trip_date_es(date) for date in block.dates)
+
+
+def may_plan_blocks_state(state: dict[str, Any]) -> dict[str, Any]:
+    blocks = state.setdefault("may_plan_blocks", {})
+    if not isinstance(blocks, dict):
+        state["may_plan_blocks"] = {}
+        return state["may_plan_blocks"]
+    return blocks
+
+
+def may_plan_block_state(state: dict[str, Any], block: MayBookingBlock) -> dict[str, Any]:
+    blocks = may_plan_blocks_state(state)
+    item = blocks.setdefault(block.key, {})
+    if not isinstance(item, dict):
+        blocks[block.key] = {}
+        return blocks[block.key]
+    return item
+
+
+def may_plan_block_done(state: dict[str, Any], block: MayBookingBlock) -> bool:
+    blocks = state.get("may_plan_blocks")
+    if not isinstance(blocks, dict):
+        return False
+    item = blocks.get(block.key)
+    return isinstance(item, dict) and bool(item.get("done"))
+
+
+def any_may_plan_block_done(state: dict[str, Any], config: May2026PlanConfig) -> bool:
+    return any(may_plan_block_done(state, block) for block in config.blocks)
+
+
+def all_may_plan_blocks_done(state: dict[str, Any], config: May2026PlanConfig) -> bool:
+    return all(may_plan_block_done(state, block) for block in config.blocks)
+
+
+def choose_plan_target_trips(
+    client: TacercaClient,
+    trips: list[dict[str, Any]],
+    block: MayBookingBlock,
+    seat: int,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    selected: list[dict[str, Any]] = []
+    problems: list[str] = []
+
+    for trip_date in block.dates:
+        candidates = [
+            trip
+            for trip in trips
+            if trip_execution_date(trip) == trip_date and trip_departure_hour(trip) == block.hour
+        ]
+        if not candidates:
+            problems.append(f"{trip_date}: no existe viaje a las {block.hour}")
+            continue
+
+        usable: list[dict[str, Any]] = []
+        blocked_reasons: list[str] = []
+        for trip in candidates:
+            ok, reason = specific_seat_available(trip, seat)
+            if ok:
+                usable.append(trip)
+                continue
+
+            existing_response = client.check_trip_exists(normalize_trip_id(trip))
+            if extract_booking_code_from_response(existing_response):
+                usable.append(trip)
+                continue
+
+            blocked_reasons.append(reason)
+
+        if not usable:
+            reason = ", ".join(sorted(set(blocked_reasons))) or "sin disponibilidad"
+            problems.append(f"{trip_date}: {reason}")
+            continue
+
+        usable.sort(key=lambda trip: normalize_trip_id(trip))
+        selected.append(usable[0])
+
+    return selected, problems
+
+
+def build_may_plan_trigger_available_message(
+    config: May2026PlanConfig,
+    trip: dict[str, Any],
+) -> str:
+    block = config.trigger_block
+    return "\n".join(
+        [
+            "Tacerca Plan Mayo - gatillo disponible",
+            f"- Ruta: {block.route_label}",
+            f"- Fecha gatillo: {format_trip_date_es(block.dates[0])}",
+            f"- Horario: {trip_departure_hour(trip)} -> {trip_arrival_hour(trip)}",
+            f"- Asiento objetivo: {config.seat}",
+            f"- Pago: {config.type_payment}",
+            "- Acción: intentar reservas por bloques.",
+        ]
+    )
+
+
+def build_may_plan_block_blocked_message(
+    config: May2026PlanConfig,
+    block: MayBookingBlock,
+    problems: list[str],
+) -> str:
+    lines = [
+        "Tacerca Plan Mayo - bloque pendiente",
+        f"- Bloque: {block.key}",
+        f"- Ruta: {block.route_label}",
+        f"- Horario: {block.hour}",
+        f"- Asiento: {config.seat}",
+        "No se ejecutó este bloque porque:",
+    ]
+    lines.extend(f"- {problem}" for problem in problems)
+    return "\n".join(lines)
+
+
+def build_may_plan_block_success_message(
+    config: May2026PlanConfig,
+    block: MayBookingBlock,
+    massive_id: str | None,
+    trips: list[dict[str, Any]],
+    existing_bookings: dict[str, str],
+) -> str:
+    lines = [
+        "Tacerca Plan Mayo - bloque reservado",
+        f"- Bloque: {block.key}",
+        f"- Ruta: {block.route_label}",
+        f"- Horario: {block.hour}",
+        f"- Asiento: {config.seat}",
+        f"- Pago: {config.type_payment}",
+    ]
+    if massive_id:
+        lines.append(f"- ID masivo: {massive_id}")
+    if existing_bookings:
+        lines.append(f"- Reservas existentes detectadas: {len(existing_bookings)}")
+    lines.append("- Días:")
+    for trip in trips:
+        trip_id = normalize_trip_id(trip)
+        suffix = " existente" if trip_id in existing_bookings else ""
+        lines.append(f"  {trip_execution_date(trip)} - trip {trip_id}{suffix}")
+    return "\n".join(lines)
+
+
+def build_may_plan_done_message(config: May2026PlanConfig) -> str:
+    return "\n".join(
+        [
+            "Tacerca Plan Mayo completado",
+            f"- Reservas objetivo: {config.total_reservations}",
+            f"- Asiento: {config.seat}",
+            f"- Pago: {config.type_payment}",
+            "- Estado: todos los bloques quedaron registrados.",
+        ]
+    )
+
+
+def build_may_plan_failed_message(
+    config: May2026PlanConfig,
+    block: MayBookingBlock,
+    exc: Exception,
+) -> str:
+    return "\n".join(
+        [
+            "Tacerca Plan Mayo - reserva fallida",
+            f"- Bloque: {block.key}",
+            f"- Ruta: {block.route_label}",
+            f"- Horario: {block.hour}",
+            f"- Asiento: {config.seat}",
+            f"- Error: {exc}",
+        ]
+    )
+
+
+def attempt_may_plan_block(
+    client: TacercaClient,
+    config: May2026PlanConfig,
+    block: MayBookingBlock,
+    trips: list[dict[str, Any]],
+    state: dict[str, Any],
+    state_file: Path,
+) -> None:
+    block_state = may_plan_block_state(state, block)
+    if block_state.get("done"):
+        return
+
+    client.type_payment = config.type_payment
+    print(f"[{now_ts()}] Intentando reservar {block.key} ({len(trips)} viaje(s))...")
+
+    existing_bookings: dict[str, str] = {}
+    trips_to_book: list[dict[str, Any]] = []
+    for trip in trips:
+        active_trip_id = normalize_trip_id(trip)
+        existing_response = client.check_trip_exists(active_trip_id)
+        existing_code = extract_booking_code_from_response(existing_response)
+        if existing_code:
+            existing_bookings[active_trip_id] = existing_code
+        else:
+            trips_to_book.append(trip)
+
+    client.get_customer()
+    client.get_payment_methods()
+
+    massive_id: str | None = None
+    create_response: dict[str, Any] = {}
+    verification: dict[str, Any] = {}
+    debug_path: Path | None = None
+
+    if trips_to_book:
+        station_origin_fallback = (
+            "Cond. Los Montes" if block.route_key == "ida" else "Metro Escuela Militar"
+        )
+        station_destination_fallback = (
+            "Metro Escuela Militar" if block.route_key == "ida" else "Cond. Los Montes"
+        )
+        payload = client.build_massive_booking_payload(
+            trips_to_book,
+            config.seat,
+            station_origin_fallback=station_origin_fallback,
+            station_destination_fallback=station_destination_fallback,
+        )
+        debug_path = Path(f"tacerca_may2026_{block.key}_payload.json")
+        debug_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        create_response = client.create_trip_massive(payload)
+        massive_id = extract_massive_id_from_response(create_response)
+        if not massive_id:
+            payment_url = create_response.get("payment_url") if isinstance(create_response, dict) else None
+            if payment_url:
+                raise RuntimeError(
+                    "Tacerca devolvió una URL de pago; la automatización no puede completar ese pago."
+                )
+            raise RuntimeError(f"No se pudo extraer massiveId desde la respuesta: {create_response}")
+
+        try:
+            verification = client.get_massive_trip(massive_id)
+        except Exception as exc:
+            verification = {"verification_error": str(exc)}
+
+    block_state["done"] = True
+    block_state["route"] = block.route_key
+    block_state["route_label"] = block.route_label
+    block_state["dates"] = block.dates
+    block_state["hour"] = block.hour
+    block_state["seat"] = config.seat
+    block_state["type_payment"] = config.type_payment
+    block_state["trip_ids"] = [normalize_trip_id(trip) for trip in trips]
+    block_state["existing_bookings"] = existing_bookings
+    if massive_id:
+        block_state["massive_id"] = massive_id
+    if debug_path:
+        block_state["payload_path"] = str(debug_path)
+    if create_response:
+        block_state["response"] = create_response
+    if verification:
+        block_state["verification"] = verification
+    save_state(state_file, state)
+
+    message = build_may_plan_block_success_message(
+        config,
+        block,
+        massive_id,
+        trips,
+        existing_bookings,
+    )
+    print(message)
+    send_telegram(message)
 
 
 def attempt_massive_booking(
@@ -1655,6 +2100,152 @@ def run_massive_check(
         raise
 
 
+def run_may2026_plan_check(
+    client: TacercaClient,
+    config: May2026PlanConfig,
+    state_file: Path,
+) -> None:
+    state = load_state(state_file)
+    client.type_payment = config.type_payment
+
+    if state.get("may_plan_done"):
+        print(f"[{now_ts()}] Plan Mayo ya completado. No se intentará de nuevo.")
+        return
+
+    if not any_may_plan_block_done(state, config):
+        trigger_block = config.trigger_block
+        trigger_date = trigger_block.dates[0]
+        trigger_trips = client.fetch_trips_for_dates(
+            [trigger_date],
+            trigger_block.origin_id,
+            trigger_block.destination_id,
+        )
+        trigger_trip = find_trip_for_date_hour(trigger_trips, trigger_date, trigger_block.hour)
+        if not trigger_trip:
+            print(
+                f"[{now_ts()}] Gatillo no disponible: {trigger_date} "
+                f"{trigger_block.hour} ({trigger_block.route_label})."
+            )
+            return
+
+        ok, reason = specific_seat_available(trigger_trip, config.seat)
+        if not ok:
+            existing_response = client.check_trip_exists(normalize_trip_id(trigger_trip))
+            if not extract_booking_code_from_response(existing_response):
+                print(
+                    f"[{now_ts()}] Gatillo encontrado, pero no utilizable: "
+                    f"{trigger_date} {trigger_block.hour}, {reason}."
+                )
+                return
+
+        alert_signature = json.dumps(
+            {
+                "trip_id": normalize_trip_id(trigger_trip),
+                "available": available_seats(trigger_trip),
+                "seat": config.seat,
+            },
+            sort_keys=True,
+        )
+        if state.get("may_plan_trigger_alert_signature") != alert_signature:
+            message = build_may_plan_trigger_available_message(config, trigger_trip)
+            print(message)
+            send_telegram(message)
+            state["may_plan_trigger_alert_signature"] = alert_signature
+            save_state(state_file, state)
+
+    for block in config.blocks:
+        if may_plan_block_done(state, block):
+            continue
+
+        trips = client.fetch_trips_for_dates(
+            block.dates,
+            block.origin_id,
+            block.destination_id,
+        )
+        snapshot = build_massive_snapshot(trips)
+        signature = make_massive_signature(snapshot)
+        block_state = may_plan_block_state(state, block)
+        if block_state.get("last_signature") != signature:
+            print(f"[{now_ts()}] Estado actualizado para {block.key}.")
+            block_state["last_signature"] = signature
+            block_state["last_snapshot"] = snapshot
+            save_state(state_file, state)
+        else:
+            print(f"[{now_ts()}] Sin cambios para {block.key}.")
+
+        selected_trips, problems = choose_plan_target_trips(client, trips, block, config.seat)
+        if problems:
+            problem_signature = json.dumps(problems, ensure_ascii=False, sort_keys=True)
+            if block_state.get("last_problem_signature") != problem_signature:
+                message = build_may_plan_block_blocked_message(config, block, problems)
+                print(message)
+                send_telegram(message)
+                block_state["last_problem_signature"] = problem_signature
+                save_state(state_file, state)
+            return
+
+        if len(selected_trips) != len(block.dates):
+            message = build_may_plan_block_blocked_message(
+                config,
+                block,
+                [f"se seleccionaron {len(selected_trips)} de {len(block.dates)} fechas requeridas"],
+            )
+            print(message)
+            send_telegram(message)
+            block_state["last_problem_signature"] = message
+            save_state(state_file, state)
+            return
+
+        try:
+            attempt_may_plan_block(client, config, block, selected_trips, state, state_file)
+        except Exception as exc:
+            message = build_may_plan_failed_message(config, block, exc)
+            print(message, file=sys.stderr)
+            send_telegram(message)
+            block_state["last_error"] = {
+                "timestamp": now_ts(),
+                "error": str(exc),
+                "trip_ids": [normalize_trip_id(trip) for trip in selected_trips],
+            }
+            save_state(state_file, state)
+            raise
+
+    if all_may_plan_blocks_done(state, config):
+        state["may_plan_done"] = True
+        state["may_plan_completed_at"] = now_ts()
+        save_state(state_file, state)
+        message = build_may_plan_done_message(config)
+        print(message)
+        send_telegram(message)
+
+
+def print_may2026_plan_config_summary(config: May2026PlanConfig) -> None:
+    print()
+    print("Validación inicial - Plan Mayo 2026")
+    print("Este flujo puede crear reservas reales en Tacerca.")
+    print(f"Frecuencia: cada {config.poll_seconds} segundo(s)")
+    print(f"Pago: {config.type_payment}")
+    print(f"Asiento objetivo: {config.seat}")
+    print(f"Total de reservas objetivo: {config.total_reservations}")
+    print("Ruta ida: Los Montes, Piedra Roja -> Escuela Militar, 06:54")
+    print("Ruta regreso: Escuela Militar -> Los Montes, Piedra Roja, 19:00")
+    print("Bloques:")
+    for block in config.blocks:
+        print(f"- {block.key}: {block.route_label}, {block.hour}, {len(block.dates)} fecha(s)")
+        print(f"  {block_dates_text(block)}")
+    print()
+
+
+def ask_may2026_plan_confirmation(
+    client: TacercaClient,
+    config: May2026PlanConfig,
+) -> bool:
+    client.build_guest(str(config.seat))
+    print_may2026_plan_config_summary(config)
+    answer = input("Escribe SI para aceptar estas condiciones y ejecutar el plan: ").strip().lower()
+    return answer in {"si", "sí", "s", "yes", "y"}
+
+
 def print_config_summary(trip_date: str, rule: ReservationRule) -> None:
     print()
     print(f"Monitoreando Tacerca para la fecha {trip_date}")
@@ -1694,6 +2285,32 @@ def main() -> int:
     try:
         mode = ask_run_mode()
         client = TacercaClient()
+
+        if mode == "3":
+            config = build_may2026_plan_config(client)
+            if not ask_may2026_plan_confirmation(client, config):
+                print("Plan Mayo cancelado por el usuario.")
+                return 0
+
+            client.login()
+            state_file = state_file_for_may2026_plan()
+            print("Plan Mayo aceptado. Presiona Ctrl+C para detener.")
+            print()
+
+            while True:
+                try:
+                    run_may2026_plan_check(client, config, state_file)
+                except requests.HTTPError as exc:
+                    print(f"HTTP error: {exc}", file=sys.stderr)
+                    if exc.response is not None:
+                        print(exc.response.text[:2000], file=sys.stderr)
+                    print()
+                except Exception as exc:
+                    print(f"Error: {exc}", file=sys.stderr)
+                    print()
+
+                time.sleep(config.poll_seconds)
+
         client.login()
 
         if mode == "2":

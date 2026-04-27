@@ -16,6 +16,8 @@ monitor.log
 tacerca_state*.json
 tacerca_booking_payload*.json
 tacerca_massive_state*.json
+tacerca_plan_mayo_2026_state.json
+tacerca_may2026_*_payload.json
 
 .pytest_cache/
 .mypy_cache/
