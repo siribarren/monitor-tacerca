@@ -38,9 +38,9 @@ jobs:
             cd "$GCP_PROJECT_PATH"
 
             echo "Actualizando código desde GitHub..."
-            git fetch origin
+            git fetch origin main
             git checkout main
-            git pull origin main
+	    git reset --hard origin/main
 
             echo "Activando entorno virtual e instalando dependencias..."
             if [ -d "venv" ]; then
