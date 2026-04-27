@@ -30,17 +30,22 @@ jobs:
           GCP_VM_USER: ${{ secrets.GCP_VM_USER }}
           GCP_PROJECT_PATH: ${{ secrets.GCP_PROJECT_PATH }}
           GCP_SERVICE_NAME: ${{ secrets.GCP_SERVICE_NAME }}
-        run:
+        run: |
           ssh -i ~/.ssh/gcp_vm_key "$GCP_VM_USER@$GCP_VM_HOST" << EOF
             set -e
 
             echo "Entrando al proyecto..."
             cd "$GCP_PROJECT_PATH"
 
+            echo "Respaldando archivo actual de GCP..."
+            if [ -f monitor_tacerca.py ]; then
+              cp monitor_tacerca.py monitor_tacerca.py.backup.\$(date +%Y%m%d-%H%M%S)
+            fi
+
             echo "Actualizando código desde GitHub..."
             git fetch origin main
             git checkout main
-	    git reset --hard origin/main
+            git reset --hard origin/main
 
             echo "Activando entorno virtual e instalando dependencias..."
             if [ -d "venv" ]; then
