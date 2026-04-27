@@ -30,7 +30,7 @@ jobs:
           GCP_VM_USER: ${{ secrets.GCP_VM_USER }}
           GCP_PROJECT_PATH: ${{ secrets.GCP_PROJECT_PATH }}
           GCP_SERVICE_NAME: ${{ secrets.GCP_SERVICE_NAME }}
-        run: |
+        run:
           ssh -i ~/.ssh/gcp_vm_key "$GCP_VM_USER@$GCP_VM_HOST" << EOF
             set -e
 
