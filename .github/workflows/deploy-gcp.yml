@@ -1,0 +1,59 @@
+name: Deploy to GCP VM
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Deploy to tacerca-monitor
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure SSH
+        env:
+          GCP_VM_HOST: ${{ secrets.GCP_VM_HOST }}
+          GCP_VM_SSH_KEY: ${{ secrets.GCP_VM_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$GCP_VM_SSH_KEY" > ~/.ssh/gcp_vm_key
+          chmod 600 ~/.ssh/gcp_vm_key
+          ssh-keyscan -H "$GCP_VM_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy to Compute Engine VM
+        env:
+          GCP_VM_HOST: ${{ secrets.GCP_VM_HOST }}
+          GCP_VM_USER: ${{ secrets.GCP_VM_USER }}
+          GCP_PROJECT_PATH: ${{ secrets.GCP_PROJECT_PATH }}
+          GCP_SERVICE_NAME: ${{ secrets.GCP_SERVICE_NAME }}
+        run: |
+          ssh -i ~/.ssh/gcp_vm_key "$GCP_VM_USER@$GCP_VM_HOST" << EOF
+            set -e
+
+            echo "Entrando al proyecto..."
+            cd "$GCP_PROJECT_PATH"
+
+            echo "Actualizando código desde GitHub..."
+            git fetch origin
+            git checkout main
+            git pull origin main
+
+            echo "Activando entorno virtual e instalando dependencias..."
+            if [ -d "venv" ]; then
+              source venv/bin/activate
+            fi
+
+            if [ -f "requirements.txt" ]; then
+              pip install -r requirements.txt
+            fi
+
+            echo "Reiniciando servicio..."
+            sudo -n systemctl restart "$GCP_SERVICE_NAME"
+
+            echo "Estado del servicio:"
+            sudo -n systemctl status "$GCP_SERVICE_NAME" --no-pager
+          EOF
